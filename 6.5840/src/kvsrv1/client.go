@@ -1,11 +1,12 @@
 package kvsrv
 
 import (
+	"time"
+
 	"6.5840/kvsrv1/rpc"
 	"6.5840/kvtest1"
 	"6.5840/tester1"
 )
-
 
 type Clerk struct {
 	clnt   *tester.Clnt
@@ -13,44 +14,41 @@ type Clerk struct {
 }
 
 func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
-	ck := &Clerk{clnt: clnt, server: server}
-	// You may add code here.
-	return ck
+	return &Clerk{clnt: clnt, server: server}
 }
 
-// Get fetches the current value and version for a key.  It returns
-// ErrNoKey if the key does not exist. It keeps trying forever in the
-// face of all other errors.
-//
-// You can send an RPC with code like this:
-// ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
-//
-// The types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. Additionally, reply must be passed as a pointer.
+// Get keeps re-trying until it gets a reply from the server, then
+// returns whatever the server replied with. Server errors (ErrNoKey)
+// surface to the caller verbatim.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	// You will have to modify this function.
-	return "", 0, rpc.ErrNoKey
+	args := rpc.GetArgs{Key: key}
+	for {
+		reply := rpc.GetReply{}
+		if ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply) {
+			return reply.Value, reply.Version, reply.Err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
-// Put updates key with value only if the version in the
-// request matches the version of the key at the server.  If the
-// versions numbers don't match, the server should return
-// ErrVersion.  If Put receives an ErrVersion on its first RPC, Put
-// should return ErrVersion, since the Put was definitely not
-// performed at the server. If the server returns ErrVersion on a
-// resend RPC, then Put must return ErrMaybe to the application, since
-// its earlier RPC might have been processed by the server successfully
-// but the response was lost, and the Clerk doesn't know if
-// the Put was performed or not.
-//
-// You can send an RPC with code like this:
-// ok := ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply)
-//
-// The types of args and reply (including whether they are pointers)
-// must match the declared types of the RPC handler function's
-// arguments. Additionally, reply must be passed as a pointer.
+// Put keeps re-trying until a reply arrives. If the very first reply is
+// ErrVersion the Put never executed and we surface ErrVersion. If we
+// already had to re-send (so an earlier attempt may have been processed
+// but its reply lost) and the server now returns ErrVersion, we cannot
+// tell whether our own write or someone else's is responsible, so we
+// downgrade to ErrMaybe per the lab spec.
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return rpc.ErrNoKey
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	retried := false
+	for {
+		reply := rpc.PutReply{}
+		if ck.clnt.Call(ck.server, "KVServer.Put", &args, &reply) {
+			if reply.Err == rpc.ErrVersion && retried {
+				return rpc.ErrMaybe
+			}
+			return reply.Err
+		}
+		retried = true
+		time.Sleep(100 * time.Millisecond)
+	}
 }

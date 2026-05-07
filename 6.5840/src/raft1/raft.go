@@ -595,6 +595,7 @@ func (rf *Raft) heartbeatLoop() {
 }
 
 func (rf *Raft) applier() {
+	defer close(rf.applyCh)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	for !rf.killed() {

@@ -88,7 +88,7 @@ func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 // seconds and then comes back" scenario, but short enough that an
 // orphaned controller goroutine on a torn-down test network exits
 // instead of spinning forever.
-const controlSweeps = 50
+const controlSweeps = 30
 
 func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
 	args := shardrpc.FreezeShardArgs{Shard: s, Num: num}

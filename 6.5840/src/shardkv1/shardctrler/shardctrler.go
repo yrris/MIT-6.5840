@@ -32,6 +32,7 @@ package shardctrler
 // dragging the whole process to a halt across tests.
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -52,8 +53,9 @@ const (
 // call before giving up. Each sweep sleeps 100ms after a no-reply, so
 // the upper bound is ~kvSweeps * 100ms wall time. Tuned low so a
 // controller goroutine orphaned on a torn-down test network exits
-// quickly instead of spawning more daemon groups every iteration.
-const kvSweeps = 30
+// quickly instead of spawning more daemon groups every iteration —
+// this is the cumulative-resource killer for `make shardkv` runs.
+const kvSweeps = 5
 
 type ShardCtrler struct {
 	clnt   *tester.Clnt
@@ -62,6 +64,13 @@ type ShardCtrler struct {
 	kvtest.IKVClerk
 
 	killed int32 // set by Kill()
+
+	// cacheMu guards cachedCfg, the last cfg we successfully read from
+	// keyCurrent. Returning a stale cfg (instead of an empty one) when
+	// the clnt is partitioned keeps test helpers like ts.leave from
+	// hitting `Leave(...) but not in config` log.Fatalf.
+	cacheMu   sync.Mutex
+	cachedCfg *shardcfg.ShardConfig
 }
 
 func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
@@ -175,15 +184,30 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	}
 }
 
-// Query returns the current configuration.
+// Query returns the current configuration. When the underlying clnt
+// has been partitioned away (kvGet exhausted retries) we return the
+// last cfg we successfully read instead of an empty one — test
+// helpers like `ts.leave` would otherwise treat the empty cfg as
+// "group already gone" and log.Fatalf, even though the real cfg in
+// kvsrv still has the group.
 func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 	for !sck.IsKilled() {
 		s, _, err := sck.kvGet(keyCurrent)
 		if err == rpc.OK {
-			return shardcfg.FromString(s)
+			cfg := shardcfg.FromString(s)
+			sck.cacheMu.Lock()
+			sck.cachedCfg = cfg
+			sck.cacheMu.Unlock()
+			return cfg
 		}
 		if err == rpc.ErrWrongLeader {
-			return shardcfg.MakeShardConfig() // network dead; return empty
+			sck.cacheMu.Lock()
+			cached := sck.cachedCfg
+			sck.cacheMu.Unlock()
+			if cached != nil {
+				return cached.Copy()
+			}
+			return shardcfg.MakeShardConfig()
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
